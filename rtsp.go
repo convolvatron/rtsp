@@ -1,12 +1,16 @@
 package main
 
 import (
+	//	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
+	//	"image/jpeg"
+	//	"io/ioutil"
 	"net"
 	"os"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -388,29 +392,112 @@ func udp_reader() string {
 	}
 	me := conn.LocalAddr()
 	_, meport, _ := net.SplitHostPort(me.String())
-	buf := make([]byte, 2048)
 	go func() {
 		var d *H264Decoder
-		var err error
-		fmt.Println("err", err)
+		var reassemble []byte
+		var sequence int
+		var iframes, bytes int
+		var dropped int
+		var last time.Time
+		misorder := make(map[int][]byte)
+
+		f, e := os.Create("stream")
+		if e != nil {
+			fmt.Println("couldn't open storage", e)
+		}
+		reassemble = []byte{0, 0, 1}
 		for {
 			// _ is from
-			len, _, err := conn.ReadFrom(buf)
+			buf := make([]byte, 2048) // we dont want to run this through the allocator - but reassembly
+			blen, _, err := conn.ReadFrom(buf)
 			if err != nil {
 				fmt.Println("err", err)
 				os.Exit(-1)
 			}
 
+			seq := int(buf[2])<<8 | int(buf[3])
 			naltype := buf[12] & 31
+			nri := buf[12] >> 5
 			switch naltype {
+			case 7:
+				reassemble = []byte{0, 0, 0, 1}
+				reassemble = append(reassemble, buf[12:blen]...)
 			case 8:
-				d, err = NewH264Decoder(append([]byte{0, 0, 1}, buf[12:]...))
-				fmt.Println("err", err, d)
-			case 28:
-				img, err2 := d.Decode(buf[12:])
-				fmt.Println("err", naltype, img, err2, len)
-			}
+				reassemble = append(reassemble, []byte{0, 0, 0, 1}...)
+				reassemble = append(reassemble, buf[12:blen]...)
+				if d == nil {
+					d, err = NewH264Decoder(reassemble)
+					i, e := d.Decode(reassemble)
+					fmt.Println(i, e)
+				}
+				// meh
 
+			case 28:
+				fua := buf[13]
+
+				if fua&0x80 != 0 { // start
+					misorder = make(map[int][]byte)
+					sequence = int(seq)
+					reassemble = []byte{0, 0, 1}
+					// my new nal
+					reassemble = append(reassemble, fua&31|(nri<<5))
+				}
+
+				if int(seq) == sequence {
+					reassemble = append(reassemble, buf[14:blen]...)
+					sequence = seq + 1
+				} else {
+					//maybe just flatten this at the end?
+					misorder[seq] = buf[14:blen]
+					for {
+						b, ok := misorder[sequence]
+						if !ok {
+							break
+						}
+						reassemble = append(reassemble, b...)
+						delete(misorder, sequence)
+						sequence++
+					}
+				}
+
+				if fua&0x40 != 0 { // end
+					if len(misorder) == 0 {
+						// first argument is image
+						_, e := d.Decode(reassemble)
+						if e != nil {
+							fmt.Println("decode error", e)
+						}
+						_, e = f.Write(reassemble) // what format do I want here?
+						if e != nil {
+							fmt.Println("file write error", e)
+						}
+						bytes += len(reassemble)
+						if e != nil {
+							fmt.Println("image decode error", e)
+						} else {
+							//							var out bytes.Buffer
+							//							err = jpeg.Encode(&out, i, &jpeg.Options{Quality: 75})
+							//							ioutil.WriteFile("/users/yuri/foo.jpeg", out.Bytes(), 0666)
+							if fua&31 == 5 {
+								fmt.Println("foo!", buf[4:8], len(reassemble), fua&31, time.Now().Sub(last), iframes)
+								last = time.Now()
+								iframes = 0
+							} else {
+								iframes++
+							}
+
+						}
+					} else {
+						o := ""
+						for k, _ := range misorder {
+							o += fmt.Sprint(k) + " "
+						}
+						dropped++
+						//						fmt.Println("discarding partial frame reception", sequence, "ave", o)
+					}
+
+				}
+			}
 		}
 	}()
 	return meport
@@ -444,6 +531,15 @@ func main() {
 						"Session": t["Session"]},
 						func(t Tuple) reader {
 							fmt.Println("play", t)
+							go func() {
+								for {
+									time.Sleep(20 * time.Second)
+									s.transact(Tuple{"method": "SET_PARAMETER",
+										"keepalive": "true", //?
+										"Session":   t["Session"]}, func(Tuple) reader { return nil })
+								}
+							}()
+
 							return nil
 						})
 					return nil
