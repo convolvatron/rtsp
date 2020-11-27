@@ -525,9 +525,18 @@ func main() {
 
 	s := connect(conf)
 
+	url := "/"
+	method := "DESCRIBE"
+	if u, e := conf["url"]; e {
+		url = u.(string)
+	}
+	if m, e := conf["method"]; e {
+		method = m.(string)
+	}
+
 	s.transact(Tuple{
-		"method": "DESCRIBE",
-		"uri":    "/"}, func(t Tuple) reader {
+		"method": method,
+		"uri":    url}, func(t Tuple) reader {
 		return s.read_sdp(t.Gint("Content-Length"),
 			func(t Tuple) reader {
 				s.transact(Tuple{
