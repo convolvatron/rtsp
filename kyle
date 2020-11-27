@@ -1,0 +1,7 @@
+address:192.168.1.100
+port:554
+user:a
+password:a
+protocol:RTSP/1.0
+url:rtsp://a:a@192.168.1.100/ch0_1.264
+method:DESCRIBE

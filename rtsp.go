@@ -7,6 +7,7 @@ import (
 	"fmt"
 	//	"image/jpeg"
 	//	"io/ioutil"
+	"io/ioutil"
 	"net"
 	"os"
 	"strings"
@@ -505,13 +506,24 @@ func udp_reader() string {
 
 func main() {
 	port := udp_reader()
-	s := connect(Tuple{
-		"address":  "192.168.42.70",
-		"port":     "554",
-		"user":     "admin",
-		"password": "tmwfte",
-		"protocol": "RTSP/1.0",
-	})
+
+	conf := Tuple{}
+	data, err := ioutil.ReadAll(os.Stdin)
+	if err != nil {
+		os.Exit(-1)
+	}
+	lines := strings.Split(string(data), "\n")
+	fmt.Println(lines)
+
+	for _, i := range lines {
+		fields := strings.SplitN(i, ":", 2)
+		fmt.Println(fields)
+		if len(fields) == 2 { // umm
+			conf[fields[0]] = fields[1]
+		}
+	}
+
+	s := connect(conf)
 
 	s.transact(Tuple{
 		"method": "DESCRIBE",
