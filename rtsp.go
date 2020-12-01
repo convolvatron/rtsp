@@ -1,15 +1,13 @@
 package main
 
 import (
-	//	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	//	"image/jpeg"
-	//	"io/ioutil"
-	"io/ioutil"
 	"net"
 	"os"
+	"reflect"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -97,6 +95,7 @@ func (s *server) transact(request Tuple, message completion) {
 			// loop protection
 			return s.input
 		} else {
+			fmt.Println("zag", reply)
 			return message(reply)
 		}
 		// dont have a parser if we're not expecting anything
@@ -133,6 +132,7 @@ func (s *server) print(length int, c completion) reader {
 }
 
 func (s *server) read_sdp(size int, message completion) reader {
+	fmt.Println("read sdp:", size)
 	tags := map[rune]string{
 		'v': "version",
 		'o': "originator",
@@ -152,8 +152,11 @@ func (s *server) read_sdp(size int, message completion) reader {
 	var tag rune
 	object := make(Tuple)
 	var self reader
-	self = s.byrune(func(rb []byte) reader {
+	// while offset < size
+	self = func(rb []byte) reader {
 		r, _ := utf8.DecodeRune(rb)
+		fmt.Println("byrune: ", state, r)
+
 		switch state {
 		case 0:
 			tag = r
@@ -179,7 +182,7 @@ func (s *server) read_sdp(size int, message completion) reader {
 			state = 0
 		}
 		return self
-	})
+	}
 	return s.bysize(size, self, func() reader {
 		return message(object)
 	})
@@ -206,30 +209,30 @@ func (s *server) bysize(size int, r reader, done func() reader) reader {
 	return self
 }
 
-func xor(a, b bool) bool {
-	return (a || b) && !(a && b)
+func GetFunctionName(i interface{}) string {
+	return runtime.FuncForPC(reflect.ValueOf(i).Pointer()).Name()
 }
+
 func (s *server) byrune(r reader) reader {
-	return func(b []byte) reader {
-		size := 0
-		if len(b) == 0 {
-			return r
+	var self reader
+	next := r
+
+	self = func(in []byte) reader {
+		// doesn't handle reassembly, but someone told me this doesn't
+		// iterate over runes, but yes...of course it does
+
+		offset := 0
+		for offset < len(in) {
+			c, len := utf8.DecodeRune(in[offset:])
+			offset += len
+			next = next([]byte(string(c)))
+			if next == nil {
+				return nil
+			}
 		}
-		if !utf8.FullRune(b) {
-			// need to keep the remainder here now
-			fmt.Println("warning, reassembly failure", len(b))
-			return nil
-		}
-		_, size = utf8.DecodeRune(b)
-		next := r(b[:size])
-		if xor(next == nil, (len(b[size:]) == 0)) {
-			fmt.Println("termination consistency error")
-		}
-		if next != nil {
-			return next(b[size:])
-		}
-		return nil
+		return self
 	}
+	return self
 }
 
 func (s *server) read_header(message completion) reader {
@@ -255,8 +258,9 @@ func (s *server) read_header(message completion) reader {
 	p := &parser{charset(' '), func() { headers["protocol"] = field }, status}
 	value.next = pname
 	var self reader
-	self = s.byrune(func(rb []byte) reader {
+	self = func(rb []byte) reader {
 		r, _ := utf8.DecodeRune(rb)
+		fmt.Println("read header", state)
 		if _, ok := p.trigger[r]; ok {
 			p.handler()
 			p = p.next
@@ -278,9 +282,10 @@ func (s *server) read_header(message completion) reader {
 		default:
 			state = 0
 		}
+		fmt.Println("returning self", self)
 		return self
-	})
-	return self
+	}
+	return s.byrune(self)
 }
 
 // transport {unicast|multicast}/profile/{udp|tcp}
@@ -378,6 +383,7 @@ func connect(props Tuple) *server {
 				return
 			}
 			s.fill += bytes
+			fmt.Println("reass", string(window[:bytes]))
 			s.input(window[:bytes])
 		}
 	}()
@@ -402,10 +408,10 @@ func udp_reader() string {
 		var last time.Time
 		misorder := make(map[int][]byte)
 
-		f, e := os.Create("stream")
-		if e != nil {
-			fmt.Println("couldn't open storage", e)
-		}
+		// f, e := os.Create("stream")
+		//if e != nil {
+		//	fmt.Println("couldn't open storage", e)
+		// }
 		reassemble = []byte{0, 0, 1}
 		for {
 			// _ is from
@@ -415,7 +421,7 @@ func udp_reader() string {
 				fmt.Println("err", err)
 				os.Exit(-1)
 			}
-
+			fmt.Println("frame")
 			seq := int(buf[2])<<8 | int(buf[3])
 			naltype := buf[12] & 31
 			nri := buf[12] >> 5
@@ -428,8 +434,13 @@ func udp_reader() string {
 				reassemble = append(reassemble, buf[12:blen]...)
 				if d == nil {
 					d, err = NewH264Decoder(reassemble)
-					i, e := d.Decode(reassemble)
-					fmt.Println(i, e)
+
+					_, e := d.Decode(reassemble)
+					fmt.Println("decode")
+					if e != nil {
+						fmt.Println("h264 decode", e.Error())
+					}
+					//
 				}
 				// meh
 
@@ -468,7 +479,7 @@ func udp_reader() string {
 						if e != nil {
 							fmt.Println("decode error", e)
 						}
-						_, e = f.Write(reassemble) // what format do I want here?
+						//						_, e = f.Write(reassemble) // what format do I want here?
 						if e != nil {
 							fmt.Println("file write error", e)
 						}
@@ -504,25 +515,8 @@ func udp_reader() string {
 	return meport
 }
 
-func main() {
+func establish(conf Tuple) {
 	port := udp_reader()
-
-	conf := Tuple{}
-	data, err := ioutil.ReadAll(os.Stdin)
-	if err != nil {
-		os.Exit(-1)
-	}
-	lines := strings.Split(string(data), "\n")
-	fmt.Println(lines)
-
-	for _, i := range lines {
-		fields := strings.SplitN(i, ":", 2)
-		fmt.Println(fields)
-		if len(fields) == 2 { // umm
-			conf[fields[0]] = fields[1]
-		}
-	}
-
 	s := connect(conf)
 
 	url := "/"
@@ -545,8 +539,7 @@ func main() {
 					"unicast":     "true",
 					"server_port": "9000",
 					"client_port": port}, func(t Tuple) reader {
-					// why is the response in the header and not...in that other
-					// stuff we got last time?
+
 					fmt.Println("session:", t, t["Session"])
 					s.transact(Tuple{"method": "PLAY",
 						"Session": t["Session"]},
